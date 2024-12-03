@@ -545,6 +545,7 @@ SchemaTable = #table(
         {"Opportunity", OpportunityListType, "opportunity/v1/opportunities?include_inactive=true", branchOpportunities, OpportunityLayout, DefaultRecLimit, true},
         {"Opportunity fundraisers", OpportunityListType, "opportunity/v1/opportunities?include_inactive=true", branchOpportunities, OpportunityFundraisersLayout, DefaultRecLimit, true},
         {"Opportunity linked gifts", OpportunityListType, "opportunity/v1/opportunities?include_inactive=true", branchOpportunities, OpportunityLinkedGiftsLayout, DefaultRecLimit, true},
+        {"Opportunity status history", OpportunityListType, "opportunity/v1/opportunities/{opportunity_id}/statushistories", branchOpportunityStatusHistory, OpportunityStatusHistoryLayout, DefaultRecLimit, true},
 
         // Event
         {"Event", EventListType, "event/v1/eventlist?include_inactive=true", branchEvents, EventLayout, 500, true},
@@ -2947,6 +2948,64 @@ OpportunityLinkedGiftsLayout = (sourceTable as table) as table =>
         finalFilter = Table.SelectRows(renameGiftId, each [gift_id] <> null)
     in
         finalFilter;
+
+OpportunityStatusHistoryLayout = (sourceTable as table) as table =>
+    let
+        // Retain essential columns
+        removeCols = Table.RemoveColumns(sourceTable, List.RemoveItems(Table.ColumnNames(sourceTable), {"id", "status_histories"})),
+        renameId = Table.RenameColumns(removeCols,{{"id", "opportunity_id"}}),
+
+        // Expand the status_histories column
+        expandStatusHistories = Table.ExpandListColumn(renameId, "status_histories"),
+        
+        // Expand the nested records in status_histories
+        expandDetails = Table.ExpandRecordColumn(expandStatusHistories, "status_histories", {"status", "date", "changed_by"}),
+
+        // Rename columns for clarity
+        renameCols = Table.RenameColumns(expandDetails, {
+            {"status", "opportunity_status"},
+            {"date", "status_date"},
+            {"changed_by", "status_changed_by"}
+        }),
+
+        // Filter null or unwanted rows (if applicable)
+        finalFilter = Table.SelectRows(renameCols, each [opportunity_status] <> null)
+    in
+        finalFilter;
+
+GetOpportunityStatusHistoryPaginated = (opportunity_id as text) =>
+    let
+        // Base URL for the API endpoint
+        baseUrl = "https://api.sky.blackbaud.com/opportunity/v1/opportunities/" & opportunity_id & "/statushistories",
+        
+        // Recursive pagination function
+        FetchPage = (offset as number, accumulatedData as table) =>
+            let
+                // Build URL with pagination parameters
+                fullUrl = baseUrl & "?limit=500&offset=" & Number.ToText(offset),
+                
+                // Fetch current page
+                response = Web.ContentsCustomRetry(fullUrl, [Headers = DefaultRequestHeaders]),
+                jsonResponse = Json.Document(response),
+                currentPageTable = Table.FromList(jsonResponse, Splitter.SplitByNothing(), null, null, ExtraValues.Error),
+
+                // Combine the current page with previously accumulated data
+                combinedData = Table.Combine({accumulatedData, currentPageTable}),
+
+                // Check if the current page is smaller than the limit (indicating the last page)
+                isLastPage = Table.RowCount(currentPageTable) < 500,
+                
+                // Recur if more pages exist
+                result = if isLastPage then combinedData else @FetchPage(offset + 500, combinedData)
+            in
+                result,
+        
+        // Start pagination with offset 0
+        allData = FetchPage(0, #table({}, {}))
+    in
+        allData;
+
+
 
 AccountCustomFieldsLayout = (sourceTable as table) as table =>
     let
